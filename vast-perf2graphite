@@ -1,0 +1,95 @@
+#!/bin/bash
+#
+#  Vast metrics API scraper   vast-perf2graphite
+#  This is called from the vast-metrics-cron every 5 minutes
+#  arg 1 is the report to pull...
+#
+# I call it from cron from a seperate cron script every 5 minutes like this this:
+# below it pulls bandwidth, latency from the reports under analytics on the API
+# for example:  https://10.100.12.201/#/reports/2  
+# that one is the first one in the cron-loop below.
+#
+# vast_perf2graphite_cron
+#for i in 2 3 8 9
+#   do /pkg/vast/API/vast-perf2graphite_sedemo $i
+#done
+
+#######
+#  
+#  Fri Aug 23 19:56:00 UTC 2019 --  rmallory initial version,  not very robust at this time
+
+# Notes:  currently it is meant to run every 5 or 10 minutes
+#  it will pull in the last 10 minutes of data with 10 second interval
+#  graphite will just overwrite the previous ones if there are duplicates.
+#  more efficient would to run every minute and get just the last minute of metrics.
+
+#dependencies:  jshon   http://kmkeen.com/jshon/
+#               curl and netcat "yum install curl netcat"
+#               graphite server somewhere
+
+installdir=`cd \`dirname $0\`; pwd`
+PATH=/bin:/usr/bin:/usr/sbin:$installdir
+HOST=`uname -n`
+
+NC="`which nc` -w1"    #some versions of netcat work better with -w1 arg.
+
+####### Fill out your variables here
+VMS=10.100.12.201      #IP of Vast management server
+VMSUSER=admin
+VMSPASS=<password>
+
+# symlink to this script with the cluster name at end:  vast-perf2graphite_sedemo
+CLUSTER=$(echo $0 | awk -F_ '{print $NF}')
+CLUSTER=$(CLUSTER:-vast)
+
+###
+GRAPHITE_HOST=10.100.12.173    #IP of Graphite host
+GRAPHITE_PORT=2003              #Graphite listener port
+
+### Default report is 2 (bandwidth), else arg 1
+REPTS=${1:-2}
+####  
+
+[[ `uname -s` = "Linux" ]] && NOW=$(date +%s)
+
+send()
+{
+    if [ ! -z "$VERBOSE"  ]; then
+        echo "Sending : $1"
+    fi
+    echo $1 | $NC $HOST $GRAPHITE_PORT
+}
+
+JSON=/tmp/vmsdata.json
+rm -f $JSON
+
+# Sometime in the past we needed to pipe through python -m json.tool
+#curl -u ${VMSUSER}:${VMSPASS} -H "accept: application/json" --insecure -X GET "https://$VMS/api/monitors/$REPTS/query/?granularity=seconds&amp;aggregation=avg&amp;format_data=true" |python -m json.tool > $JSON
+
+curl -u ${VMSUSER}:${VMSPASS} -H "accept: application/json" --insecure -X GET "https://$VMS/api/monitors/$REPTS/query/?granularity=seconds&amp;aggregation=avg&amp;format_data=true" > $JSON
+
+# howto convert to epochtime:   date -d "2019-07-02T02:24:38Z" +%s
+
+NUMELEMENTS="`$installdir/jshon -e data -l < $JSON `"
+NUMELEMENTS=$((NUMELEMENTS-1))
+
+echo NUMELEMENTS=$NUMELEMENTS
+
+ELE2=$($installdir/jshon -e prop_list  -e 2 < $JSON | awk -F, '{print $NF}' | tr -d \" )
+ELE3=$($installdir/jshon -e prop_list  -e 3 < $JSON | awk -F, '{print $NF}' | tr -d \" )
+
+for i in $(seq 1 $NUMELEMENTS)
+do 
+ LDATE=$($installdir/jshon -e data -e $i -e 0 < $JSON | tr -d \")
+ EPOCHT=$(date -d $LDATE +%s)
+ VELE2=$($installdir/jshon -e data -e $i -e 2 < $JSON) 
+ VELE3=$($installdir/jshon -e data -e $i -e 3 < $JSON)
+
+#echo it to stdout for debug
+ echo vast.seperf.${ELE2} ${VELE2} $EPOCHT
+ echo vast.seperf.${ELE3} ${VELE3} $EPOCHT
+#now actually send it to Graphite
+ echo vast.seperf.${ELE2} ${VELE2} $EPOCHT| $NC $GRAPHITE_HOST ${GRAPHITE_PORT}
+ echo vast.seperf.${ELE3} ${VELE3} $EPOCHT| $NC $GRAPHITE_HOST ${GRAPHITE_PORT}
+
+done

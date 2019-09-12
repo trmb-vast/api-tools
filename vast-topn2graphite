@@ -1,0 +1,96 @@
+#!/bin/bash
+#
+#  Vast metrics API scraper  topN
+#  This is called from the vast-metrics-cron every 5 minutes
+#  
+#  Fri Sep  6 12:34:55 PDT 2019  rmallory .. adapted from metrics scraper.
+
+# Notes:  
+#  topN is tricky... it can really have a TON of data, and fill up your graphite database.
+#  especially since this current version does not omit zero-values... 
+#  currently it is meant to run every minute.
+
+#dependencies:  jshon   http://kmkeen.com/jshon/
+#               netcat "yum install netcat"
+#               curl   "yum install curl"
+#               graphite server somewhere
+
+installdir=`cd \`dirname $0\`; pwd`
+PATH=/bin:/usr/bin:/usr/sbin:$installdir
+HOST=`uname -n`
+
+NC="`which nc` -w1"    #some versions of netcat work better with -w1 arg.
+
+####### Fill out your variables here
+VMS=10.100.21.201      #IP of Vast management server
+VMSUSER=admin
+VMSPASS=<password>
+
+# symlink to this script with the cluster name as last
+CLUSTER=$(echo $0 | awk -F_ '{print $NF}')
+if [ "x${CLUSTER}" = "x" ]
+   then CLUSTER=VastOne
+fi
+
+echo CLUSTER: $CLUSTER
+CLUSTER=sedemo
+
+###
+GRAPHITE_HOST=10.100.12.173    #IP of Graphite host
+GRAPHITE_PORT=2003              #Graphite listener port
+
+### Default report is 2, else arg 1
+REPTS=${1:-2}
+
+DEBUG=false
+
+
+####  
+
+[[ `uname -s` = "Linux" ]] && NOW=$(date +%s)
+
+send()
+{
+    if [ ! -z "$VERBOSE"  ]; then
+        echo "Sending : $1"
+    fi
+    echo $1 | $NC $HOST $GRAPHITE_PORT
+}
+
+JSON=/tmp/uggggvmsdata.json
+rm -f $JSON
+
+echo "...Calling API with curl"
+curl -u ${VMSUSER}:${VMSPASS} -H "accept: application/json" --insecure -X GET "https://$VMS/api/monitors/topn/" |python -m json.tool > $JSON
+
+#'https://10.100.21.201/api/monitors/topn/
+
+# convert to epochtime:   date -d "2019-07-02T02:24:38Z" +%s
+
+NUMELEMENTS="`$installdir/jshon -l < $JSON `"
+#NUMELEMENTS=$((NUMELEMENTS-1))
+
+echo NUMELEMENTS=$NUMELEMENTS
+
+#### notimenow.. work on this part later to name by multiple keys.
+KEYNAMES1=`$installdir/jshon  -k < $JSON  | tr '\n' ' '`
+for KEY1 in $KEYNAMES1
+   do KEYNAMES2=`$installdir/jshon -e $KEY1 -k < $JSON  | tr '\n' ' '`
+        for KEY2 in $KEYNAMES2
+          do NUM2="`$installdir/jshon -e $KEY1 -e $KEY2  -l < $JSON `"
+           for ((NUM=1;NUM<=NUM2;NUM++))
+             do KEYNAMES3=`$installdir/jshon -e $KEY1 -e $KEY2 -e $NUM -k < $JSON  | tr '\n' ' '`
+                title=`$installdir/jshon -e $KEY1 -e $KEY2 -e $NUM -e title -u < $JSON`
+          # title can have illegal characters in it.. ip addrs dots,  parenthencies for users, slashes.
+                title=$(echo $title | tr -d '\(' | tr -d '\)' | tr '/' '_' | tr '.' '_' | tr -d ' ')
+                
+                 for KEY3 in $(echo $KEYNAMES3 | sed "s/title//")
+                  do value="`$installdir/jshon -e $KEY1 -e $KEY2 -e $NUM -e $KEY3 -u < $JSON `"   
+                  echo vast.${CLUSTER}.$KEY1.$KEY2.$title.$KEY3 $value $NOW   
+                  echo vast.${CLUSTER}.$KEY1.$KEY2.$title.$KEY3 $value $NOW   | $NC $GRAPHITE_HOST ${GRAPHITE_PORT}
+                 done
+             done
+        done 
+    done
+
+
