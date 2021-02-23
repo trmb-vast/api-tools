@@ -1,0 +1,127 @@
+#!/bin/bash
+#
+#  Vast metrics API scraper 
+#  This is called from the vast-metrics-cron every minute
+#  arg 1 is the report to pull
+#  rob@vastdata.com 
+#  Fri Aug 23 19:56:00 UTC 2019 --  initial version,  not very robust at this time
+
+# Notes:  currently it is meant to run every 5 minutes but you can run it 1permin
+#  it will pull in the last 10 minutes of data with 10 second interval
+#  graphite will just overwrite the previous ones if there are duplicates.
+#  more efficient would to run every minute and get just the last minute of metrics.
+
+# You have to install the following
+#dependencies:  jshon   http://kmkeen.com/jshon/
+#               netcat "yum install netcat"
+#               graphite server somewhere
+
+installdir=$(cd $(dirname $0); pwd)
+PATH=/bin:/usr/bin:/usr/sbin:$installdir
+HOST=$(uname -n)
+
+NC="$(which nc) -w1"    #some versions of netcat work better with -w1 arg.
+
+####### Fill out your variables here
+
+VMSUSER=admin
+VMSPASS=<password>
+
+
+# Hardcode these if you don't want to pass them as args.
+VMS=10.100.12.201               #IP of Vast management server
+#GRAPHITE_HOST=10.100.12.173    #IP of Graphite host   
+#GRAPHITE_PORT=2003             #Graphite listener port     
+CLUSTER=vast
+
+###
+USAGE="$0 -c <cluster>  -i <vms IP>  -g <graphite host>  -p <graphite port> -r <report>"
+echo NUMARGS=$#
+if [ $# -lt 10 ]
+then echo "All args below are mandatory"
+     echo $USAGE
+     exit
+fi
+
+
+local opt OPTARG OPTIND
+
+while getopts "c:i:g:p:r:v" c
+      do
+          case "${c}" in
+              "v")      VERBOSE=true ;;
+              "c")      CLUSTER=${OPTARG} ;;
+              "i")      VMS="${OPTARG}" ;;
+              "g")      GRAPHITE_HOST="${OPTARG}" ;;
+              "p")      GRAPHITE_PORT="${OPTARG}" ;;
+              "r")      REPT="${OPTARG}" ;;
+             \?)      echo $USAGE
+                      exit 2;;
+          esac
+      done
+
+
+
+echo CLUSTER: $CLUSTER     VMS: $VMS  Graphite_Host: ${GRAPHITE_HOST}:${GRAPHITE_PORT}   Reports: $REPT
+
+# Bail out if user has not configured us.
+if [ "x${GRAPHITE_HOST}" = "x" ] 
+then echo "You need to set args"
+     echo $USAGE
+     exit
+fi
+
+
+
+####  
+
+# Timestamp all these with localtime()
+[[ $(uname -s) = "Linux" ]] && NOW=$(date +%s)
+
+#### Function to send to graphite with netcat
+send()
+{
+    if [ ! -z "$VERBOSE"  ]; then
+        echo "Sending : $1"
+    fi
+    echo $1 | $NC $HOST $GRAPHITE_PORT
+}
+
+JSON=/tmp/vmsdata.json
+rm -f $JSON
+
+set -x
+curl -u ${VMSUSER}:${VMSPASS} -H "accept: application/json" --insecure -X GET "https://$VMS/api/monitors/$REPT/query/?granularity=seconds&amp;aggregation=avg&amp;format_data=true" |python -m json.tool > $JSON
+set +x
+
+# how convert to epochtime:   date -d "2019-07-02T02:24:38Z" +%s
+
+NUMELEMENTS="`$installdir/jshon -e data -l < $JSON `"
+NUMELEMENTS=$((NUMELEMENTS-1))
+
+echo NUMELEMENTS=$NUMELEMENTS
+
+####### OK, so below we use jshon ... which is a bit outdated, but was around before jq was common.
+#######  someday I'll flip this over to jq, or just python
+
+ELE2=$($installdir/jshon -e prop_list  -e 2 < $JSON | awk -F, '{print $NF}' | tr -d \" )
+ELE3=$($installdir/jshon -e prop_list  -e 3 < $JSON | awk -F, '{print $NF}' | tr -d \" )
+
+for i in $(seq 1 $NUMELEMENTS)
+do 
+ LDATE=$($installdir/jshon -e data -e $i -e 0 < $JSON | tr -d \")
+ EPOCHT=$(date -d $LDATE +%s)
+ VELE2=$($installdir/jshon -e data -e $i -e 2 < $JSON) 
+ VELE3=$($installdir/jshon -e data -e $i -e 3 < $JSON)
+
+#echo it to stdout for debug
+ echo vast.${CLUSTER}.${ELE2} ${VELE2} $EPOCHT
+ echo vast.${CLUSTER}.${ELE3} ${VELE3} $EPOCHT
+#now actually send it to Graphite
+ echo vast.${CLUSTER}.${ELE2} ${VELE2} $EPOCHT| $NC $GRAPHITE_HOST ${GRAPHITE_PORT}
+ echo vast.${CLUSTER}.${ELE3} ${VELE3} $EPOCHT| $NC $GRAPHITE_HOST ${GRAPHITE_PORT}
+
+done
+
+exit
+
