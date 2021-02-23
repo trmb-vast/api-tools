@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+#  Vast metrics API scraper 
+#  This is called from the vast-metrics-cron every 5 minutes
+#  arg 1 is the report to pull
+#  rob@vastdata.com 
+#  Fri Aug 23 19:56:00 UTC 2019 --  initial version,  not very robust at this time
+
+# Notes:  currently it is meant to run every 5 minutes but you can run it 1permin
+#  it will pull in the last 10 minutes of data with 10 second interval
+#  graphite will just overwrite the previous ones if there are duplicates.
+#  more efficient would to run every minute and get just the last minute of metrics.
+
+# You have to install the following
+#dependencies:  jshon   http://kmkeen.com/jshon/
+#               netcat "yum install netcat"
+#               graphite server somewhere
+
+installdir=$(cd $(dirname $0); pwd)
+PATH=/bin:/usr/bin:/usr/sbin:$installdir
+HOST=$(uname -n)
+
+NC="$(which nc) -w1"    #some versions of netcat work better with -w1 arg.
+
+####### Fill out your variables here
+VMS=10.25.30.1   #IP of Vast management server
+VMSUSER=admin
+VMSPASS=***REMOVED***
+
+# symlink to this script with the cluster name as last
+CLUSTER=$(echo $0 | awk -F_ '{print $NF}')
+CLUSTER=${CLUSTER:-vast}
+
+case $CLUSTER in
+       se-perf|seperf) VMS=10.100.121.201 ;;
+       se-demo|sedemo) VMS=10.100.127.201 ;;
+       stac) VMS=10.100.234.201 ;;
+esac
+GRAPHITE_HOST=10.25.30.137 #IP of Graphite host
+          
+
+echo CLUSTER: $CLUSTER     VMS: $VMS  Graphite_Host: $GRAPHITE_HOST
+
+###
+GRAPHITE_PORT=2003              #Graphite listener port
+
+### Default report is 2, else arg 1
+REPTS=${1:-2}
+
+DEBUG=false
+
+
+####  
+
+[[ `uname -s` = "Linux" ]] && NOW=$(date +%s)
+
+send()
+{
+    if [ ! -z "$VERBOSE"  ]; then
+        echo "Sending : $1"
+    fi
+    echo $1 | $NC $HOST $GRAPHITE_PORT
+}
+
+JSON=/tmp/vmsdata.json
+rm -f $JSON
+
+curl -u ${VMSUSER}:${VMSPASS} -H "accept: application/json" --insecure -X GET "https://$VMS/api/monitors/$REPTS/query/?granularity=seconds&amp;aggregation=avg&amp;format_data=true" |python -m json.tool > $JSON
+
+# convert to epochtime:   date -d "2019-07-02T02:24:38Z" +%s
+
+NUMELEMENTS="`$installdir/jshon -e data -l < $JSON `"
+NUMELEMENTS=$((NUMELEMENTS-1))
+
+echo NUMELEMENTS=$NUMELEMENTS
+
+####### OK, so below we use jshon ... which is a bit outdated, but was around before jq was common.
+#######  someday I'll flip this over to jq.
+
+ELE2=$($installdir/jshon -e prop_list  -e 2 < $JSON | awk -F, '{print $NF}' | tr -d \" )
+ELE3=$($installdir/jshon -e prop_list  -e 3 < $JSON | awk -F, '{print $NF}' | tr -d \" )
+
+for i in $(seq 1 $NUMELEMENTS)
+do 
+ LDATE=$($installdir/jshon -e data -e $i -e 0 < $JSON | tr -d \")
+ EPOCHT=$(date -d $LDATE +%s)
+ VELE2=$($installdir/jshon -e data -e $i -e 2 < $JSON) 
+ VELE3=$($installdir/jshon -e data -e $i -e 3 < $JSON)
+
+#echo it to stdout for debug
+ echo vast.${CLUSTER}.${ELE2} ${VELE2} $EPOCHT
+ echo vast.${CLUSTER}.${ELE3} ${VELE3} $EPOCHT
+#now actually send it to Graphite
+ echo vast.${CLUSTER}.${ELE2} ${VELE2} $EPOCHT| $NC $GRAPHITE_HOST ${GRAPHITE_PORT}
+ echo vast.${CLUSTER}.${ELE3} ${VELE3} $EPOCHT| $NC $GRAPHITE_HOST ${GRAPHITE_PORT}
+
+done
+
+exit
+
+
+#### notimenow.. work on this part later to name by multiple keys.
+   KEYNAMES1=`$installdir/jshon -e data -e pool.perf -e operation_counts -k < $JSON  | tr '\n' ' '`
+for KEY1 in $KEYNAMES1
+do KEYNAMES2=`$installdir/jshon -e results -e pool.perf -e operation_counts -e $KEYNAMES1 -k < $JSON  | tr '\n' ' '`
+
+for KEY2 in $KEYNAMES2
+do value="`$installdir/jshon -e results -e pool.perf -e operation_counts -e $KEY1 -e $KEY2 -u < $JSON `"
+   echo vast.${CLUSTER}.$KEY1.$KEY2 $value $NOW
+   echo vast.${CLUSTER}.$KEY1.$KEY2 $value $NOW   | $NC $GRAPHITE_HOST ${GRAPHITE_PORT}
+done
+done
+

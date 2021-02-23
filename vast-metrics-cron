@@ -1,0 +1,15 @@
+#!/bin/bash
+#
+#  Vast metrics API scraper cron
+#  This is meant to be called from cron every 5 minutes
+#  the args below are the various "reports" to gather from the VAST metrics api.
+#  rob@vastdata.com Fri Aug 23 19:34:47 UTC 2019
+
+#   reports listed below.. eg: 2 is bandwidth, 3 is latency
+
+installdir=`cd \`dirname $0\`; pwd`
+
+for i in 1 2 3 4 5 8
+   do $installdir/vast-metrics-to-graphite_vast1  $i 
+vast-metrics-to_graphite
+done
